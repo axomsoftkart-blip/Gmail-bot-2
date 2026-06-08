@@ -1,0 +1,14 @@
+{
+  "name": "gmail-auto-reply-bot",
+  "version": "1.0.0",
+  "description": "Professional Auto Reply Bot for Gmail",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "imap-simple": "^5.1.0",
+    "nodemailer": "^6.9.13"
+  }
+}
