@@ -1,156 +1,165 @@
-@@ -2,67 +2,89 @@ const express = require('express');
-const imap = require('imap-simple');
+const express = require('express');
+const Imap = require('imap');
+const { simpleParser } = require('mailparser');
 const nodemailer = require('nodemailer');
 
-// Render se variables lena
+// ---------------------------------------------------------
+// 1. DUMMY HTTP SERVER (Required to keep Render instances alive)
+// ---------------------------------------------------------
+const app = express();
+const port = process.env.PORT || 3000;
+app.get('/', (req, res) => res.status(200).send('Ultimate Auto-Reply Bot is Active and Running!'));
+app.listen(port, () => console.log(`[SERVER] HTTP Web Server listening on port ${port}`));
+
+// ---------------------------------------------------------
+// 2. ENVIRONMENT VARIABLES (Credentials injected from Render)
+// ---------------------------------------------------------
 const EMAIL = process.env.EMAIL_USER;
 const PASSWORD = process.env.EMAIL_PASS;
 
-// --- DUMMY SERVER (Render ko active rakhne ke liye) ---
-// --- DUMMY SERVER ---
-const app = express();
-const port = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Bot is Live and Running!'));
-app.get('/', (req, res) => res.send('Advanced Bot is Live!'));
-app.listen(port, () => console.log(`Web server started on port ${port}`));
+if (!EMAIL || !PASSWORD) {
+  console.error('[FATAL ERROR] Email credentials are missing in Environment Variables.');
+  process.exit(1);
+}
 
-// --- EMAIL BHEJNE KI SETTING (Nodemailer) ---
-// --- EMAIL SENDER SETTING ---
+// ---------------------------------------------------------
+// 3. STARTUP TIMESTAMP (Prevents replying to older backlog emails)
+// ---------------------------------------------------------
+const startupTime = new Date();
+console.log(`[SYSTEM] Bot Boot Timestamp: ${startupTime.toISOString()}`);
+
+// ---------------------------------------------------------
+// 4. NODEMAILER CONFIGURATION (For sending auto-replies)
+// ---------------------------------------------------------
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: { user: EMAIL, pass: PASSWORD }
 });
 
-// --- EMAIL PADHNE KI SETTING (IMAP) ---
-// --- EMAIL RECEIVER SETTING ---
-const config = {
-  imap: {
-    user: EMAIL,
-    password: PASSWORD,
-    host: 'imap.gmail.com',
-    port: 993,
-    tls: true,
-    authTimeout: 5000,
-    authTimeout: 10000,
-    tlsOptions: { rejectUnauthorized: false }
-  }
-};
+// ---------------------------------------------------------
+// 5. IMAP CONFIGURATION (For receiving and listening to emails)
+// ---------------------------------------------------------
+const imap = new Imap({
+  user: EMAIL,
+  password: PASSWORD,
+  host: 'imap.gmail.com',
+  port: 993,
+  tls: true,
+  tlsOptions: { rejectUnauthorized: false },
+  keepalive: { interval: 10000, idleInterval: 300000, forceNoop: true } 
+});
 
-// 🔴 SABSE ZARURI FIX: Bot kis waqt start hua, uski exact timing note kar lo
-const botStartTime = new Date(); 
-console.log(`Bot is Booting up at: ${botStartTime}`);
-
-async function checkNewEmails() {
-  let connection;
-  try {
-    const connection = await imap.connect(config);
-    connection = await imap.connect(config);
-    await connection.openBox('INBOX');
-
-    // Sirf 'Unread' (naye) emails dhundho
-    // Sirf Unread emails search karo
-    const searchCriteria = ['UNSEEN'];
-    const fetchOptions = {
-      bodies: ['HEADER'],
-      markSeen: true // Padhne ke baad email ko 'Read' mark kar dega
-    };
-    const fetchOptions = { bodies: ['HEADER'], markSeen: true };
-
-    const results = await connection.search(searchCriteria, fetchOptions);
-
-    if (results.length > 0) {
-      console.log(`Total naye emails mile: ${results.length}`);
+// --- IMAP CONNECTION EVENT LISTENERS ---
+imap.once('ready', () => {
+  console.log('[IMAP] Connection Successful. Listening for incoming emails...');
+  
+  imap.openBox('INBOX', false, (err, box) => {
+    if (err) {
+      console.error('[IMAP ERROR] Failed to open INBOX:', err.message);
+      return;
     }
+    
+    // Triggered instantly when a new email arrives in the INBOX
+    imap.on('mail', (numNewMsgs) => {
+      console.log(`[ALERT] New mail detected: ${numNewMsgs} message(s) in queue.`);
+      processUnseenEmails();
+    });
+  });
+});
 
-    for (let item of results) {
-      const header = item.parts.find(part => part.which === 'HEADER');
-      if (header && header.body && header.body.from) {
-      if (header && header.body) {
+imap.on('error', (err) => {
+  console.error('[IMAP ERROR] Connection issue:', err.message);
+});
 
-        const rawFrom = header.body.from[0];
-        const rawFrom = header.body.from ? header.body.from[0] : '';
-        const rawDate = header.body.date ? header.body.date[0] : '';
-        const subject = header.body.subject ? header.body.subject[0] : 'No Subject';
+imap.once('end', () => {
+  console.log('[IMAP WARNING] Connection ended unexpectedly. Reconnecting in 10 seconds...');
+  setTimeout(() => imap.connect(), 10000);
+});
 
-        // Sender ka actual email address nikalna
-        const emailMatch = rawFrom.match(/<(.+)>/);
-        const senderEmail = emailMatch ? emailMatch[1] : rawFrom;
-        const emailDate = new Date(rawDate); // Email aane ka time
+// ---------------------------------------------------------
+// 6. CORE LOGIC: FETCH AND FILTER EMAILS (360-Degree Optimized)
+// ---------------------------------------------------------
+function processUnseenEmails() {
+  imap.search(['UNSEEN'], (err, results) => {
+    if (err || !results || results.length === 0) return;
 
-        console.log(`Naya mail aaya -> Sender: ${senderEmail} | Subject: ${subject}`);
-        // ---------------------------------------------------------
-        // 🛡️ LOOPHOLE FILTERS (Kisko reply NAHI karna hai)
-        // ---------------------------------------------------------
+    // markSeen: true instantly marks the email as 'Read' to prevent duplicate processing
+    const fetchStream = imap.fetch(results, { bodies: '', markSeen: true }); 
+
+    fetchStream.on('message', (msg, seqno) => {
+      msg.on('body', (stream, info) => {
         
-        // 1. Agar email bot start hone se pehle ka hai (Purana backlog) -> SKIP
-        if (emailDate < botStartTime) {
-          console.log(`Skipped Old Backlog Email: ${senderEmail}`);
-          continue; 
-        }
+        // simpleParser streams data efficiently without overloading the 512MB RAM
+        simpleParser(stream, async (err, parsed) => {
+          if (err) {
+            console.error('[PARSE ERROR] Failed to parse email body:', err.message);
+            return;
+          }
+          
+          const sender = parsed.from.value[0].address;
+          const subject = parsed.subject || 'No Subject';
+          const emailDate = parsed.date;
 
-        // 2. Agar sender bot khud hai (Infinite loop se bachne ke liye) -> SKIP
-        if (senderEmail.toLowerCase() === EMAIL.toLowerCase()) {
-          console.log(`Skipped Own Email (Loop Prevention).`);
-          continue;
-        }
+          // --- STRICT SECURITY FILTERS ---
+          
+          // Filter A: Ignore emails received before the bot started
+          if (emailDate < startupTime) {
+            console.log(`[FILTERED] Skipped Old Backlog Email: Subject [${subject}]`);
+            return;
+          }
+          
+          // Filter B: Ignore emails sent by the bot itself (Infinite Loop Prevention)
+          if (sender.toLowerCase() === EMAIL.toLowerCase()) {
+            console.log(`[FILTERED] Skipped Self-Email (Loop Prevention): Subject [${subject}]`);
+            return;
+          }
+          
+          // Filter C: Ignore automated systems, daemons, and no-reply addresses
+          if (/noreply|no-reply|daemon|mailer|postmaster/i.test(sender)) {
+            console.log(`[FILTERED] Skipped Automated Sender: [${sender}]`);
+            return;
+          }
 
-        // 3. Agar email kisi 'noreply' ya automated system se aayi hai -> SKIP
-        if (senderEmail.toLowerCase().includes('noreply') || senderEmail.toLowerCase().includes('no-reply') || senderEmail.toLowerCase().includes('daemon')) {
-          console.log(`Skipped Automated/No-reply Email: ${senderEmail}`);
-          continue;
-        }
-
-        // ---------------------------------------------------------
-        // ✅ VALID EMAIL (Ab isko reply bhejo)
-        // ---------------------------------------------------------
-        console.log(`New Valid Mail Detected -> Sender: ${senderEmail} | Subject: ${subject}`);
-
-        // --- PROFESSIONAL AUTO-REPLY MESSAGE ---
-        const replyMessage = `Hello,
-
-Thank you for reaching out. 
-@@ -77,27 +99,29 @@ Support Team
----
-Note: This is an auto-generated email. Please do not reply to this message.`;
-
-        // Reply Bhejna
-        await transporter.sendMail({
-          from: EMAIL,
-          to: senderEmail,
-          subject: `Re: ${subject} (Auto-Reply)`,
-          text: replyMessage
+          console.log(`[VALIDATED] Processing Email from: [${sender}] | Subject: [${subject}]`);
+          sendAutoReply(sender, subject);
         });
+      });
+    });
 
-        console.log(`Auto-reply successfully sent to: ${senderEmail}`);
-        // Error handling ke sath bhejna (Taki ek fail ho toh bot crash na ho)
-        try {
-          await transporter.sendMail({
-            from: EMAIL,
-            to: senderEmail,
-            subject: `Re: ${subject} (Auto-Reply)`,
-            text: replyMessage
-          });
-          console.log(`✅ Auto-reply successfully sent to: ${senderEmail}`);
-        } catch (sendErr) {
-          console.error(`❌ Reply bhejne mein fail hua (${senderEmail}):`, sendErr.message);
-        }
-      }
-    }
+    fetchStream.once('error', (err) => {
+      console.error('[FETCH ERROR] Stream error occurred:', err.message);
+    });
+  });
+}
 
-    connection.end(); // Kaam khatam hone par connection close
-    connection.end(); 
+// ---------------------------------------------------------
+// 7. AUTO-REPLY GENERATOR
+// ---------------------------------------------------------
+async function sendAutoReply(toEmail, originalSubject) {
+  const replyBody = `Hello,
+
+Thank you for contacting us regarding "${originalSubject}".
+
+This is an automated acknowledgment to confirm that we have successfully received your message. Our team will review your inquiry and get back to you with a comprehensive response as soon as possible.
+
+Best Regards,
+Support Team
+
+---
+[System Note: This is an auto-generated message. Please do not reply directly to this email.]`;
+  
+  try {
+    await transporter.sendMail({
+      from: EMAIL,
+      to: toEmail,
+      subject: `Re: ${originalSubject} (Auto-Reply)`,
+      text: replyBody
+    });
+    console.log(`[SUCCESS] Auto-reply dispatched to: [${toEmail}]`);
   } catch (error) {
-    console.error('Email check karne mein error aaya:', error);
-    console.error('Email checking process mein error aaya:', error.message);
-    if (connection) connection.end(); // Error aane par connection reset karega
+    console.error(`[SEND ERROR] Failed to dispatch reply to [${toEmail}]:`, error.message);
   }
 }
 
-// Bot ko har 30 seconds mein naye emails check karne ka order dena
-// Har 30 seconds mein check karega
-setInterval(checkNewEmails, 30000);
-console.log("Bot Start ho gaya hai! Har 30 seconds mein inbox check karega...");
-
-// Turant ek baar check karo
-console.log("Advanced Bot Start ho gaya hai! Purane mails ignore karke sirf naye mails ka wait kar raha hai...");
-checkNewEmails();
+// Initialize the IMAP connection to start the bot
+imap.connect();
